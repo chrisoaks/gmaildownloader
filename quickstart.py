@@ -1,12 +1,11 @@
-
 from __future__ import print_function
 import httplib2
 import os
 import base64
 import time
-
 from apiclient import errors
 from apiclient import discovery
+import pickle
 import oauth2client
 from oauth2client import client
 from oauth2client import tools
@@ -23,8 +22,51 @@ SCOPES = 'https://www.googleapis.com/auth/gmail.readonly'
 CLIENT_SECRET_FILE = 'client_secret.json'
 APPLICATION_NAME = 'Gmail API Python Quickstart'
 
+if os.name == 'nt':
+    import ctypes
+    from ctypes import windll, wintypes
+    from uuid import UUID
 
-def GetAttachments(service, user_id, msg_id, prefix=""):
+    # ctypes GUID copied from MSDN sample code
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", wintypes.BYTE * 8)
+        ] 
+
+        def __init__(self, uuidstr):
+            uuid = UUID(uuidstr)
+            ctypes.Structure.__init__(self)
+            self.Data1, self.Data2, self.Data3, \
+                self.Data4[0], self.Data4[1], rest = uuid.fields
+            for i in range(2, 8):
+                self.Data4[i] = rest>>(8-i-1)*8 & 0xff
+
+    SHGetKnownFolderPath = windll.shell32.SHGetKnownFolderPath
+    SHGetKnownFolderPath.argtypes = [
+        ctypes.POINTER(GUID), wintypes.DWORD,
+        wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)
+    ]
+
+    def _get_known_folder_path(uuidstr):
+        pathptr = ctypes.c_wchar_p()
+        guid = GUID(uuidstr)
+        if SHGetKnownFolderPath(ctypes.byref(guid), 0, 0, ctypes.byref(pathptr)):
+            raise ctypes.WinError()
+        return pathptr.value
+
+    FOLDERID_Download = '{374DE290-123F-4565-9164-39C4925E467B}'
+
+    def get_download_folder():
+        return _get_known_folder_path(FOLDERID_Download)
+else:
+    def get_download_folder():
+        home = os.path.expanduser("~")
+        return os.path.join(home, "Downloads")
+
+def GetAttachments(attidlist, dlfolderstring, service, user_id, msg_id, prefix=""):
   """Get and store attachment from Message with given id.
 
   Args:
@@ -43,7 +85,6 @@ def GetAttachments(service, user_id, msg_id, prefix=""):
          for part in message['payload']['parts']:
            if part['filename']:
              print (part['filename'])
-             print (part['body']['attachmentId'])
              print (msg_id)
              if 'data' in part['body']:
                data=part['body']['data']
@@ -51,11 +92,13 @@ def GetAttachments(service, user_id, msg_id, prefix=""):
                att_id=part['body']['attachmentId']
                att=service.users().messages().attachments().get(userId=user_id, messageId=msg_id,id=att_id).execute()
                data=att['data']
+
              file_data = base64.urlsafe_b64decode(data.encode('UTF-8'))
-             path = "C:/Users/Chris/Downloads/" + part['filename']
+             print (dlfolderstring)
+             path = dlfolderstring + "\\" +  part['filename']
 
              with open(path, 'wb') as f:
-               f.write(file_data)
+                f.write(file_data)
            
       except KeyError:
         print ("keyerror with " + msg_id)
@@ -123,37 +166,67 @@ def ListMessagesMatchingQuery(service, user_id, query=''):
       
 
     return messages[:10]
-  except errors.HttpError, error:
+  except KeyError:
     print('An error occurred:')
-
+def prefparse():
+    try:
+        f = open('preferences.txt', 'r')
+        dlstring = f.read()
+        if str == "":
+            f = open('preferences.txt','w')
+            dlstring =get_download_folder()
+            f.write(dlstring)
+            return dlstring
+    except IOError:
+        print("IOError in prefparse")
+        f = open('preferences.txt','w')
+        dlstring =get_download_folder()
+        f.write(dlstring)
+        return dlstring
+    return dlstring
 def main():
     """Shows basic usage of the Gmail API.
 
     Creates a Gmail API service object and outputs a list of label names
     of the user's Gmail account.
     """
-
+    print(os.getcwd())
+    try:
+        with open('attidlistfile', 'r') as f:
+            i = 0
+            attidlist = []
+            for line in f:
+                attidlist[i] = line
+                i = i + i
+    except IOError:
+        print("Nothing to load")
+        attidlist = []
+    dlfolderstring = prefparse()
     credentials = get_credentials()
     http = credentials.authorize(httplib2.Http())
     service = discovery.build('gmail', 'v1', http=http)
 
     results = service.users().labels().list(userId='me').execute()
     labels = results.get('labels', [])
+    oldmessages = []
     while True:
         
         messages = ListMessagesMatchingQuery(service,'me')
-
-        #print(messages)
-        for dictionaries in messages:
-            
-            GetAttachments(service, 'me', dictionaries[u'id'],r'C:\Users\Steve\Desktop\Incoming')
-        time.sleep(120)
+ 
+        print(messages)
+        for dictionary in messages:
+            if dictionary not in oldmessages:
+                GetAttachments(attidlist, dlfolderstring, service, 'me', dictionary[u'id'],r'C:\Users\Steve\Desktop\Incoming')
+            else:
+                print("message already taken care of")
+        time.sleep(30)
         if not labels:
             print('No labels found.')
         else:
           print('Labels:')
           for label in labels:
             print(label['name'])
+        oldmessages = messages
 
 if __name__ == '__main__':
     main()
